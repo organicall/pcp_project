@@ -1,0 +1,5 @@
+-std=c++17
+-Xpreprocessor
+-fopenmp
+-I/opt/homebrew/opt/libomp/include
+-O3
