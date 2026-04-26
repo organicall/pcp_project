@@ -4,7 +4,7 @@ Progressive implementations of the PageRank algorithm, benchmarking the impact o
 
 Based on two papers:
 - **Paper 1** — Zhou et al., *"Design and Implementation of Parallel PageRank on Multicore Platforms"* (IEEE 2017)
-- **Paper 2** — Garg & Kothapalli, *"STIC-D: Algorithmic Techniques for Efficient Parallel PageRank Computation on Real-World Graphs"* (ICDCN 2016)
+- **Paper 2** — Garg & Kothapalli, *"A Closer Look at Lightweight Graph Reordering"* (IISWC’19)
 
 ---
 
