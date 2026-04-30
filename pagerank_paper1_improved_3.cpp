@@ -1,34 +1,3 @@
-// pagerank_paper1_improved_3.cpp
-//
-// improved partitioned parallel pagerank — seven optimisations layered on top of
-// zhou et al. (paper 1):
-//
-//   1. edge-balanced partitioning: partition boundaries chosen so each partition
-//      owns roughly equal numbers of edges, not equal numbers of vertices.
-//      fixes the load imbalance caused by high-degree hub nodes.
-//
-//   2. hybrid accumulator: uses thread-local flat arrays (no atomics) when the
-//      total footprint fits in l3, falls back to a global atomic acc[] otherwise.
-//      this scales correctly at both low and high thread counts.
-//
-//   3. longest-job-first ordering: partitions sorted by edge count descending
-//      before the loop. heavy partitions start first so threads stay busy longer
-//      at the tail of each scatter phase.
-//
-//   4. precomputed contributions: contrib[u] = D*pr[u]/outdeg[u] computed once
-//      per iteration, eliminating per-edge division in the scatter inner loop.
-//
-//   5. scaled partition count: k >= nthreads * K_MULT to give guided scheduling
-//      enough chunks to steal at high thread counts.
-//
-//   6. guided scheduling in scatter: chunks start large and shrink, reducing
-//      scheduler overhead while keeping load balanced.
-//
-//   7. dbg vertex reordering: vertices renumbered by in-degree descending so hub
-//      nodes cluster at the front of all arrays. thread-local accumulator slices
-//      receive spatially coherent writes, keeping hot entries in l2.
-//      (faldu et al., "a closer look at lightweight graph reordering", iiswc 2019)
-
 #include "graph_loader.h"
 #include <omp.h>
 #include <cmath>
@@ -37,11 +6,12 @@
 #include <vector>
 #include <algorithm>
 #include <numeric>
+#include <limits>
 
 static constexpr double D         = 0.85;
 static constexpr double THRESHOLD = 1e-10;
 static constexpr int    MAX_ITER  = 200;
-static constexpr int    K_MULT    = 4;   // minimum partitions per thread — empirically chosen
+static constexpr int    K_MULT    = 4;   // minimum partitions per thread 
 
 // if nthreads * n * 8 bytes exceeds this, the local-acc footprint won't fit in l3
 // and we fall back to atomic global acc[] to avoid thrashing
@@ -72,15 +42,15 @@ int main(int argc, char* argv[]) {
 
     std::cout << "Vertices: " << g.n << "  Edges: " << g.m << "\n";
 
-    // dbg: degree-based grouping vertex reordering
-    //
+    // dbg: (degree-based grouping vertex reordering)
+    // brief explanation 
     // hub nodes (high in-degree) receive the most scatter writes. if their entries
     // in the thread-local accumulator land at scattered offsets, every write is a
     // cache miss. by renumbering vertices so the highest in-degree nodes get ids 0,1,2,...
     // their accumulator slots end up at the front of localAcc[], which stays warm
-    // in l2 across the entire scatter phase.
+    // in l3 across the entire scatter phase.
     //
-    // cost: one O(n log n) sort before any iterations. no change to the pr math.
+    // one O(n log n) sort before any iterations. no change in the pr math.
 
     Timer tDBG; tDBG.start();
 
@@ -178,6 +148,54 @@ int main(int argc, char* argv[]) {
     for (auto& e : g.edges)
         parts[vertexToPart[e.src]].edgeList.push_back({e.src, e.dst});
     g.edges.clear(); g.edges.shrink_to_fit();
+
+    // --- partition size diagnostics ---
+    {
+        // per-partition details (only when k is small to avoid terminal flood)
+        if (k <= 50) {
+            std::cout << "Partition details:\n";
+            for (int p = 0; p < k; p++) {
+                long long ne = (long long)parts[p].edgeList.size();
+                int nv = parts[p].vEnd - parts[p].vStart;
+                std::cout << "  part[" << p << "]"
+                          << "  vRange=[" << parts[p].vStart << ", " << parts[p].vEnd << ")"
+                          << "  nVertices=" << nv
+                          << "  nEdges=" << ne << "\n";
+            }
+        }
+
+        // summary (always printed)
+        long long eMin = (long long)parts[0].edgeList.size();
+        long long eMax = eMin;
+        double    eSum = 0.0;
+        for (int p = 0; p < k; p++) {
+            long long ne = (long long)parts[p].edgeList.size();
+            eMin  = std::min(eMin, ne);
+            eMax  = std::max(eMax, ne);
+            eSum += (double)ne;
+        }
+        double eMean = eSum / k;
+        double eVar  = 0.0;
+        for (int p = 0; p < k; p++) {
+            double diff = (double)parts[p].edgeList.size() - eMean;
+            eVar += diff * diff;
+        }
+        double eStdDev = std::sqrt(eVar / k);
+
+        std::cout << "Partition summary:\n"
+                  << "  k             = " << k       << "\n"
+                  << "  min edges     = " << eMin    << "\n"
+                  << "  max edges     = " << eMax    << "\n"
+                  << "  mean edges    = " << eMean   << "\n"
+                  << "  stddev edges  = " << eStdDev << "\n"
+                  << "  imbalance (max/min)  = "
+                      << (eMin > 0 ? (double)eMax / eMin : std::numeric_limits<double>::infinity())
+                      << "\n"
+                  << "  imbalance (max/mean) = "
+                      << (eMean > 0.0 ? eMax / eMean : std::numeric_limits<double>::infinity())
+                      << "\n";
+    }
+    // --- end partition size diagnostics ---
 
     // print how much better the load balance is vs the original fixed-vertex scheme
     {
